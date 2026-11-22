@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BZ Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root{
+  --bg:#000; --panel:#0a0a0a; --line:#262626; --line2:#1a1a1a;
+  --amber:#ffa028; --amber-dim:#a8651a; --txt:#d9d9d9; --mute:#7a7a7a;
+  --up:#3ddc84; --down:#ff4d4d; --cyan:#4fc3f7; --sel:#2a1c08;
+  --gold:#ffd24d; --silver:#c7c7c7; --copper:#d08a4f;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
+  font:13px/1.35 "IBM Plex Mono",ui-monospace,Consolas,monospace;overflow:hidden}
+.app{display:grid;grid-template-rows:auto auto 1fr auto;height:100vh}
+/* barre du haut */
+.top{display:flex;align-items:center;gap:18px;padding:6px 12px;background:var(--amber);color:#000;font-weight:600}
+.top .brand{letter-spacing:.08em}
+.top select{background:#000;color:var(--amber);border:0;font:inherit;padding:2px 6px}
+.top .sp{flex:1}
+.top .k{opacity:.65;font-weight:500;margin-right:4px}
+/* bandeau défilant */
+.tape{border-bottom:1px solid var(--line);overflow:hidden;white-space:nowrap;height:24px;line-height:24px;background:#050505}
+.tape-inner{display:inline-block;padding-left:100%;animation:scroll 90s linear infinite}
+.tape:hover .tape-inner{animation-play-state:paused}
+.tape span.t{margin-right:28px;cursor:pointer}
+@keyframes scroll{to{transform:translateX(-100%)}}
+/* corps */
+.main{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);min-height:0}
+.pane{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
+.ph{display:flex;align-items:center;gap:6px;padding:6px 8px;border-bottom:1px solid var(--line);background:var(--panel)}
+.ph .title{color:var(--amber);font-weight:600;margin-right:8px}
+input.search{flex:1;background:#000;border:1px solid var(--line);color:var(--amber);font:inherit;padding:4px 8px;outline:none}
+input.search:focus{border-color:var(--amber)}
+.tabs button{background:none;border:1px solid var(--line);color:var(--mute);font:inherit;padding:3px 8px;cursor:pointer}
+.tabs button.on{color:#000;background:var(--amber);border-color:var(--amber)}
+.tabs button:hover:not(.on){color:var(--amber)}
+.scroll{overflow:auto;min-height:0;flex:1}
+table{width:100%;border-collapse:collapse}
+th{position:sticky;top:0;background:#111;color:var(--amber-dim);font-weight:500;text-align:right;padding:4px 8px;
+   border-bottom:1px solid var(--line);cursor:pointer;user-select:none;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th.sorted{color:var(--amber)}
+td{padding:3px 8px;text-align:right;border-bottom:1px solid var(--line2);white-space:nowrap}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:#111}
+tbody tr.sel{background:var(--sel);outline:1px solid var(--amber-dim)}
+td.name{max-width:280px;overflow:hidden;text-overflow:ellipsis}
+.ico{width:16px;height:16px;vertical-align:-3px;margin-right:6px;border:1px solid #333;background:#222;display:inline-block}
+.up{color:var(--up)} .down{color:var(--down)} .mute{color:var(--mute)}
+.g{color:var(--gold)} .s{color:var(--silver)} .c{color:var(--copper)}
+.q-POOR{color:#9d9d9d}.q-COMMON{color:#fff}.q-UNCOMMON{color:#1eff00}.q-RARE{color:#4a9eff}
+.q-EPIC{color:#b65cf2}.q-LEGENDARY{color:#ff8000}
+.deal{background:#0f2a17;color:var(--up);padding:0 4px}
+/* détail */
+.detail{display:flex;flex-direction:column;min-height:0}
+.dh{padding:10px 12px;border-bottom:1px solid var(--line)}
+.dh .nm{font-size:17px;font-weight:600;display:flex;align-items:center;gap:8px}
+.dh .nm img{width:28px;height:28px;border:1px solid #444}
+.dh .px{font-size:22px;margin-top:4px}
+.dh .px small{font-size:13px;margin-left:10px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line)}
+.stats div{padding:6px 12px;border-right:1px solid var(--line2)}
+.stats .l{color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+.chartbar{display:flex;gap:6px;padding:6px 12px;align-items:center}
+.chartbar .lg{margin-left:auto;font-size:11px;color:var(--mute)}
+.chartbar .lg b{display:inline-block;width:10px;height:2px;vertical-align:middle;margin:0 4px 0 10px}
+#chart{height:300px;flex:none;border-bottom:1px solid var(--line)}
+.book td,.book th{padding:2px 12px}
+.bar{position:relative}
+.bar i{position:absolute;right:0;top:2px;bottom:2px;background:#2b1a05;z-index:0}
+.bar span{position:relative;z-index:1}
+.empty{padding:40px;color:var(--mute);text-align:center}
+.foot{display:flex;gap:20px;padding:4px 12px;border-top:1px solid var(--line);color:var(--mute);font-size:11px;background:var(--panel)}
+.foot b{color:#000;background:var(--amber-dim);padding:0 4px;margin-right:4px;font-weight:500}
+@media (max-width:900px){
+  html,body{overflow:auto}
+  .app{height:auto}
+  .main{grid-template-columns:1fr}
+  .pane{max-height:60vh;border-right:0}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <span class="brand">BZ&nbsp;TERMINAL</span>
+    <select id="ah"></select>
+    <span><span class="k">MAJ</span><span id="upd">—</span></span>
+    <span><span class="k">ANNONCES</span><span id="nauc">—</span></span>
+    <span><span class="k">SNAPSHOTS</span><span id="nsnap">—</span></span>
+    <span class="sp"></span>
+    <span id="clock"></span>
+  </div>
+  <div class="tape"><div class="tape-inner" id="tape"></div></div>
+
+  <div class="main">
+    <section class="pane">
+      <div class="ph">
+        <span class="title">MARCHÉ</span>
+        <input class="search" id="q" placeholder="Rechercher un objet…  ( / )" autocomplete="off">
+        <span class="tabs" id="tabs">
+          <button data-v="all" class="on">TOUS</button>
+          <button data-v="up">HAUSSES</button>
+          <button data-v="down">BAISSES</button>
+          <button data-v="deals">AFFAIRES</button>
+          <button data-v="vol">VOLUME</button>
+        </span>
+      </div>
+      <div class="scroll" id="boardWrap">
+        <table>
+          <thead><tr id="head"></tr></thead>
+          <tbody id="board"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pane detail" id="detail">
+      <div class="empty">Sélectionne un objet</div>
+    </section>
+  </div>
+
+  <div class="foot">
+    <span><b>/</b>recherche</span><span><b>↑↓</b>naviguer</span><span><b>1-5</b>onglets</span>
+    <span><b>Échap</b>effacer</span>
+    <span style="margin-left:auto" id="count"></span>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pad = n => String(n).padStart(2, "0");
+const nf = new Intl.NumberFormat("fr-FR");
+
+function gold(c, html = true) {
+  if (c == null) return '<span class="mute">—</span>';
+  c = Math.round(c);
+  const g = Math.floor(c / 10000), s = Math.floor(c % 10000 / 100), cu = c % 100;
+  const G = v => html ? `<span class="g">${v}g</span>` : v + "g";
+  const S = v => html ? `<span class="s">${v}s</span>` : v + "s";
+  const C = v => html ? `<span class="c">${v}c</span>` : v + "c";
+  if (g >= 1000) return G(nf.format(g));
+  if (g > 0) return G(g) + " " + S(pad(s));
+  if (s > 0) return S(s) + " " + C(pad(cu));
+  return C(cu);
+}
+const pct = v => v == null || !isFinite(v) ? '<span class="mute">—</span>'
+  : `<span class="${v > 0 ? "up" : v < 0 ? "down" : "mute"}">${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%</span>`;
+const ago = ts => { const m = Math.round((Date.now() / 1000 - ts) / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${pad(m % 60)}`; };
+const fmtTime = ts => new Date(ts * 1000).toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
+const icon = r => r.icon ? `<img class="ico" src="${esc(r.icon)}" loading="lazy" alt="">` : `<span class="ico"></span>`;
+// Deux modes : serveur local (python server.py) ou site statique (GitHub Pages, fichiers JSON pré-générés)
+const STATIC = window.BZ_STATIC === true;
+const getJSON = u => fetch(u, { cache: "no-cache" }).then(r => r.ok ? r.json() : null);
+async function api(p, params) {
+  if (!STATIC) return getJSON(p + "?" + new URLSearchParams(params));
+  if (p === "/api/meta") return getJSON("api/meta.json");
+  if (p === "/api/board") return getJSON(`api/board/${params.ah}.json`);
+  if (p === "/api/item") {
+    const bucket = await getJSON(`api/items/${params.ah}/${params.id % 100}.json`) || {};
+    const e = bucket[params.id] || { h: [], b: [], i: [] };
+    return {
+      item: { id: +params.id, name: e.i[0], quality: e.i[1], icon: e.i[2] },
+      history: e.h.map(([ts, min, med, qty, n, sold]) => ({ ts, min, med, qty, n, sold })),
+      book: e.b.map(([price, qty, n]) => ({ price, qty, n })),
+    };
+  }
+}
+
+const state = { ah: null, rows: [], view: [], tab: "all", sort: "sold24", dir: -1, sel: null, q: "" };
+
+const COLS = [
+  { k: "name",   l: "OBJET",       f: r => `${icon(r)}<span class="q-${r.quality || "COMMON"}">${esc(r.name || "Objet #" + r.id)}</span>` },
+  { k: "min",    l: "MIN",         f: r => gold(r.min) },
+  { k: "med",    l: "MÉDIANE",     f: r => gold(r.med) },
+  { k: "chg",    l: "Δ24H",        f: r => pct(r.chg) },
+  { k: "vs7",    l: "VS MOY 7J",   f: r => r.vs7 != null && r.vs7 <= -0.3 && r.n7 >= 6 ? `<span class="deal">${(r.vs7*100).toFixed(0)}%</span>` : pct(r.vs7) },
+  { k: "qty",    l: "QTÉ",         f: r => nf.format(r.qty) },
+  { k: "n",      l: "ANN.",        f: r => nf.format(r.n) },
+  { k: "sold24", l: "VENTES 24H*", f: r => r.sold24 ? nf.format(r.sold24) : '<span class="mute">0</span>' },
+];
+
+function renderHead() {
+  $("#head").innerHTML = COLS.map(c =>
+    `<th data-k="${c.k}" class="${state.sort === c.k ? "sorted" : ""}">${c.l}${state.sort === c.k ? (state.dir < 0 ? " ▼" : " ▲") : ""}</th>`).join("");
+}
+$("#head").addEventListener("click", e => {
+  const k = e.target.closest("th")?.dataset.k; if (!k) return;
+  if (state.sort === k) state.dir *= -1; else { state.sort = k; state.dir = k === "name" ? 1 : -1; }
+  renderBoard();
+});
+
+function computeView() {
+  const q = state.q.trim().toLowerCase();
+  let v = state.rows.filter(r => !q || (r.name || "").toLowerCase().includes(q) || String(r.id) === q);
+  const liquid = r => r.qty >= 5 && r.n >= 2;
+  let sort = state.sort, dir = state.dir;
+  if (state.tab === "up")    { v = v.filter(r => liquid(r) && r.chg > 0); sort = "chg"; dir = -1; }
+  if (state.tab === "down")  { v = v.filter(r => liquid(r) && r.chg < 0); sort = "chg"; dir = 1; }
+  if (state.tab === "deals") { v = v.filter(r => r.vs7 != null && r.vs7 <= -0.2 && r.n7 >= 6 && (r.sold24 || 0) > 0); sort = "vs7"; dir = 1; }
+  if (state.tab === "vol")   { sort = "sold24"; dir = -1; }
+  if (state.tab !== "all") { state.sort = sort; state.dir = dir; }
+  v.sort((a, b) => {
+    let x = a[sort], y = b[sort];
+    if (sort === "name") return dir * String(x || "").localeCompare(String(y || ""), "fr");
+    x = x ?? -Infinity * dir; y = y ?? -Infinity * dir;
+    return dir * (x - y) || (b.n - a.n);  // à égalité : les objets les plus listés d'abord
+  });
+  state.view = v;
+}
+
+function renderBoard() {
+  computeView(); renderHead();
+  const shown = state.view.slice(0, 400);
+  $("#board").innerHTML = shown.map(r =>
+    `<tr data-id="${r.id}" class="${r.id === state.sel ? "sel" : ""}">${COLS.map(c => `<td class="${c.k === "name" ? "name" : ""}">${c.f(r)}</td>`).join("")}</tr>`
+  ).join("") || `<tr><td colspan="${COLS.length}" class="empty">Aucun objet</td></tr>`;
+  $("#count").textContent = `${state.view.length} objets${state.view.length > 400 ? " (400 affichés)" : ""} · * ventes estimées (annonces disparues avant expiration)`;
+}
+$("#board").addEventListener("click", e => { const id = e.target.closest("tr")?.dataset.id; if (id) select(+id); });
+
+function renderTape() {
+  const m = state.rows.filter(r => r.qty >= 5 && r.n >= 2 && r.chg != null && r.chg !== 0 && (r.sold24 || 0) > 0)
+    .sort((a, b) => Math.abs(b.chg) - Math.abs(a.chg)).slice(0, 25);
+  $("#tape").innerHTML = m.map(r =>
+    `<span class="t" data-id="${r.id}"><span class="q-${r.quality || "COMMON"}">${esc(r.name || "#" + r.id)}</span> ${gold(r.min)} ${pct(r.chg)}</span>`).join("")
+    || '<span class="mute">Pas encore assez d\'historique pour les variations</span>';
+}
+$("#tape").addEventListener("click", e => { const id = e.target.closest(".t")?.dataset.id; if (id) select(+id); });
+
+/* ---- détail objet ---- */
+let chart, sMin, sMed, sQty, range = "7d", detailData = null;
+const tz = -new Date().getTimezoneOffset() * 60;
+
+async function select(id) {
+  state.sel = id;
+  document.querySelectorAll("#board tr").forEach(tr => tr.classList.toggle("sel", +tr.dataset.id === id));
+  document.querySelector(`#board tr[data-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
+  const d = await api("/api/item", { ah: state.ah, id });
+  if (state.sel !== id) return;
+  detailData = d; renderDetail();
+}
+
+function renderDetail() {
+  if (chart) { chart.remove(); chart = null; }
+  const d = detailData, it = d.item, row = state.rows.find(r => r.id === it.id) || {};
+  const h = d.history, last = h[h.length - 1] || {};
+  const maxQ = Math.max(1, ...d.book.map(b => b.qty));
+  let cum = 0;
+  $("#detail").innerHTML = `
+    <div class="dh">
+      <div class="nm">${it.icon ? `<img src="${esc(it.icon)}" alt="">` : ""}<span class="q-${it.quality || "COMMON"}">${esc(it.name || "Objet #" + it.id)}</span>
+        <span class="mute" style="font-size:12px;font-weight:400">#${it.id}</span></div>
+      <div class="px">${gold(last.min)} <small>${pct(row.chg)} <span class="mute">24h</span></small></div>
+    </div>
+    <div class="stats">
+      <div><div class="l">Médiane</div>${gold(last.med)}</div>
+      <div><div class="l">Moy. médiane 7j</div>${gold(row.med7)}</div>
+      <div><div class="l">En vente</div>${nf.format(last.qty || 0)} <span class="mute">/ ${last.n || 0} ann.</span></div>
+      <div><div class="l">Ventes 24h*</div>${nf.format(row.sold24 || 0)}</div>
+    </div>
+    <div class="chartbar tabs" id="ranges">
+      ${["24h","7d","30d","all"].map(r => `<button data-r="${r}" class="${r === range ? "on" : ""}">${{"24h":"24H","7d":"7J","30d":"30J","all":"TOUT"}[r]}</button>`).join("")}
+      <span class="lg"><b style="background:var(--amber)"></b>min <b style="background:var(--cyan)"></b>médiane <b style="background:#3a3a3a;height:8px"></b>quantité</span>
+    </div>
+    <div id="chart"></div>
+    <div class="ph"><span class="title">CARNET D'ORDRES</span><span class="mute">annonces en cours, prix unitaire</span></div>
+    <div class="scroll">
+      <table class="book"><thead><tr><th>PRIX UNIT.</th><th>QTÉ</th><th>ANN.</th><th>CUMUL</th><th>COÛT CUMULÉ</th></tr></thead>
+      <tbody>${(() => { let cost = 0; return d.book.map(b => { cum += b.qty; cost += b.qty * b.price; return `<tr>
+        <td>${gold(b.price)}</td>
+        <td class="bar"><i style="width:${(b.qty / maxQ * 100).toFixed(1)}%"></i><span>${nf.format(b.qty)}</span></td>
+        <td>${b.n}</td><td>${nf.format(cum)}</td><td>${gold(cost)}</td></tr>`; }).join(""); })()
+        || '<tr><td colspan="5" class="empty">Aucune annonce avec achat immédiat</td></tr>'}</tbody></table>
+    </div>`;
+  $("#ranges").addEventListener("click", e => { const r = e.target.dataset.r; if (r) { range = r; renderDetail(); } });
+  drawChart(h);
+}
+
+function drawChart(h) {
+  const el = $("#chart");
+  chart = LightweightCharts.createChart(el, {
+    autoSize: true,
+    layout: { background: { color: "#000" }, textColor: "#8a8a8a", fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
+    grid: { vertLines: { color: "#141414" }, horzLines: { color: "#141414" } },
+    rightPriceScale: { borderColor: "#262626" },
+    timeScale: { borderColor: "#262626", timeVisible: true, secondsVisible: false },
+    crosshair: { mode: 0 },
+    localization: { locale: "fr-FR" },
+  });
+  const pf = { type: "custom", minMove: 0.0001, formatter: v => gold(v * 10000, false) };
+  sQty = chart.addHistogramSeries({ color: "#2a2a2a", priceScaleId: "q", priceFormat: { type: "volume" } });
+  chart.priceScale("q").applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
+  sMed = chart.addLineSeries({ color: "#4fc3f7", lineWidth: 1, priceFormat: pf, lastValueVisible: false, priceLineVisible: false });
+  sMin = chart.addLineSeries({ color: "#ffa028", lineWidth: 2, priceFormat: pf });
+  const cut = { "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, all: Infinity }[range];
+  const lastTs = h.length ? h[h.length - 1].ts : 0;
+  const pts = h.filter(p => p.ts > lastTs - cut);
+  sMin.setData(pts.filter(p => p.min != null).map(p => ({ time: p.ts + tz, value: p.min / 10000 })));
+  sMed.setData(pts.filter(p => p.med != null).map(p => ({ time: p.ts + tz, value: p.med / 10000 })));
+  sQty.setData(pts.map(p => ({ time: p.ts + tz, value: p.qty })));
+  chart.timeScale().fitContent();
+}
+
+/* ---- chargement ---- */
+async function loadMeta() {
+  const m = await api("/api/meta", {});
+  const sel = $("#ah");
+  if (!m || !m.houses.length) {
+    $("#boardWrap").innerHTML = STATIC
+      ? '<div class="empty">Pas encore de données : la première collecte GitHub est peut-être en cours.</div>'
+      : '<div class="empty">Aucune donnée. Lance <b>python collect.py</b> (ou <b>python demo_seed.py</b>).</div>';
+    return null;
+  }
+  const prev = state.ah;
+  sel.innerHTML = m.houses.map(h => `<option value="${h.key}">${esc(h.realm_name || "")} · ${esc(h.name)}</option>`).join("");
+  state.ah = prev && m.houses.some(h => h.key === prev) ? prev : (localStorage.getItem("bz.ah") || m.houses[m.houses.length > 1 ? 1 : 0].key);
+  if (!m.houses.some(h => h.key === state.ah)) state.ah = m.houses[0].key;
+  sel.value = state.ah;
+  return m;
+}
+async function loadBoard() {
+  const m = await loadMeta(); if (!m) return;
+  const h = m.houses.find(x => x.key === state.ah);
+  $("#upd").textContent = h.last_ts ? `${fmtTime(h.last_ts)} (il y a ${ago(h.last_ts)})` : "—";
+  $("#nauc").textContent = h.n_auctions != null ? nf.format(h.n_auctions) : "—";
+  $("#nsnap").textContent = h.n_snapshots;
+  const b = await api("/api/board", { ah: state.ah });
+  state.rows = b.rows.map(r => ({
+    ...r,
+    chg: r.min != null && r.min_prev ? r.min / r.min_prev - 1 : null,
+    vs7: r.min != null && r.med7 ? r.min / r.med7 - 1 : null,
+  }));
+  renderBoard(); renderTape();
+  if (state.sel == null && state.view.length) select(state.view[0].id);
+  else if (state.sel != null) select(state.sel);
+}
+
+$("#ah").addEventListener("change", e => { state.ah = e.target.value; try { localStorage.setItem("bz.ah", state.ah); } catch {} state.sel = null; loadBoard(); });
+$("#q").addEventListener("input", e => { state.q = e.target.value; renderBoard(); });
+$("#tabs").addEventListener("click", e => {
+  const v = e.target.dataset.v; if (!v) return;
+  state.tab = v; document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
+  if (v === "all") { state.sort = "sold24"; state.dir = -1; }
+  renderBoard();
+});
+document.addEventListener("keydown", e => {
+  const inSearch = document.activeElement === $("#q");
+  if (e.key === "/" && !inSearch) { e.preventDefault(); $("#q").focus(); $("#q").select(); return; }
+  if (e.key === "Escape") { $("#q").value = ""; state.q = ""; $("#q").blur(); renderBoard(); return; }
+  if (!inSearch && "12345".includes(e.key) && e.key.length === 1) { document.querySelectorAll("#tabs button")[+e.key - 1].click(); return; }
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const i = state.view.findIndex(r => r.id === state.sel);
+    const n = Math.max(0, Math.min(state.view.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
+    if (state.view[n]) select(state.view[n].id);
+  }
+});
+setInterval(() => { $("#clock").textContent = new Date().toLocaleTimeString("fr-FR"); }, 1000);
+setInterval(loadBoard, 5 * 60 * 1000);
+loadBoard();
+</script>
+</body>
+</html>

@@ -1,0 +1,90 @@
+name: Collecte HV
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # GitHub peut retarder de quelques minutes, sans gravité
+  workflow_dispatch:          # bouton "Run workflow" pour lancer à la main
+
+permissions:
+  contents: write   # pousser la branche data
+  pages: write      # publier le terminal
+  id-token: write
+
+concurrency:
+  group: collecte
+  cancel-in-progress: false
+
+env:
+  BZ_REGION: eu
+  BZ_LOCALE: fr_FR
+  BZ_NAMESPACE: dynamic-forever-eu
+  BZ_RULESET: "1"
+  BZ_AUCTION_HOUSES: "113"        # 110 = Alliance, 113 = Horde, 116 = Flots noirs (ex : "110,113,116")
+  BZ_REALM_NAME: Forever PvP
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      changed: ${{ steps.run.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Récupérer la base depuis la branche data
+        run: |
+          mkdir -p data
+          if git fetch --depth=1 origin data 2>/dev/null; then
+            git show FETCH_HEAD:auctions.db.gz | gunzip > data/auctions.db
+            ls -lh data/auctions.db
+          else
+            echo "Pas encore de branche data : première collecte."
+          fi
+
+      - name: Collecte, compaction, export
+        id: run
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+        run: python cloud_run.py ${{ github.event_name == 'workflow_dispatch' && '--force-export' || '' }}
+
+      - name: Sauvegarder la base sur la branche data
+        if: steps.run.outputs.changed == 'true'
+        run: |
+          out="$RUNNER_TEMP/data-branch"
+          mkdir -p "$out"
+          gzip -9 -c data/auctions.db > "$out/auctions.db.gz"
+          cp site/Data.lua "$out/Data.lua"
+          ls -lh "$out"
+          size=$(stat -c %s "$out/auctions.db.gz")
+          if [ "$size" -gt 95000000 ]; then echo "::error::Base trop grosse pour GitHub ($size octets)"; exit 1; fi
+          cd "$out"
+          git init -q -b data
+          git config user.name "bz-terminal-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Données HV $(date -u +'%Y-%m-%d %H:%M') UTC"
+          # historique écrasé à chaque fois : la branche ne grossit pas
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+
+      - name: Préparer le site
+        if: steps.run.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: collect
+    if: needs.collect.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publier sur GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
