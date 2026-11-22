@@ -2,7 +2,8 @@ name: Collecte HV
 
 on:
   schedule:
-    - cron: "*/20 * * * *"   # GitHub peut retarder de quelques minutes, sans gravité
+    # minutes décalées : GitHub retarde/saute souvent les créneaux pile (:00, :20, :40)
+    - cron: "7,27,47 * * * *"
   workflow_dispatch:          # bouton "Run workflow" pour lancer à la main
 
 permissions:
