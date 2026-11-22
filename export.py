@@ -85,7 +85,10 @@ def write_lua(path: Path, houses):
     lines = ["-- Généré automatiquement par BZ Terminal, ne pas modifier.", "BZT_DATA = {",
              f"  generated = {int(time.time())},", "  houses = {"]
     for h, board in houses:
-        lines.append(f"    [{lua_str(h['key'])}] = {{ name = {lua_str(h['name'])}, ts = {board['ts']}, items = {{")
+        name = h["name"] or ""
+        faction = "Horde" if "Horde" in name else "Alliance" if "Alliance" in name else "Neutral"
+        lines.append(f"    [{lua_str(h['key'])}] = {{ name = {lua_str(name)}, faction = {lua_str(faction)}, "
+                     f"ts = {board['ts']}, items = {{")
         for r in board["rows"]:
             vals = [r["min"], r["med"], round(r["med7"]) if r["med7"] else None, r["sold24"], r["min_prev"]]
             lines.append(f"      [{r['id']}]={{{','.join('nil' if v is None else str(int(v)) for v in vals)}}},")

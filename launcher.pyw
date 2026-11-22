@@ -1,47 +1,71 @@
-"""BZ Terminal — lanceur graphique (double-clic). Démarre/arrête la collecte, ouvre le terminal."""
+"""BZ Terminal — lanceur (double-clic).
+
+La collecte tourne sur GitHub. Ce lanceur :
+  - installe / met à jour l'addon BZTerminal dans WoW Forever,
+  - télécharge les dernières données (Data.lua) toutes les 15 min,
+  - ouvre le terminal en ligne.
+"""
+import json
 import os
 import queue
-import sqlite3
+import shutil
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import urllib.request
 import webbrowser
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-os.chdir(ROOT)
-
-from bz.api import ENV_FILE, load_env, update_env  # noqa: E402
-
-PORT = 8765
-URL = f"http://localhost:{PORT}"
-DB = ROOT / "data" / "auctions.db"
+CONFIG = ROOT / "launcher.json"
+ADDON_SRC = ROOT / "addon" / "BZTerminal"
+SITE_URL = "https://lainedylan2612-wq.github.io/Bloodbzerg/"
+SYNC_EVERY = 15 * 60
 STARTUP_LNK = Path(os.environ.get("APPDATA", "")) / r"Microsoft\Windows\Start Menu\Programs\Startup\BZ Terminal.lnk"
 DESKTOP_LNK = Path.home() / "Desktop" / "BZ Terminal.lnk"
+WOW_CANDIDATES = [
+    Path(r"C:\Program Files (x86)\World of Warcraft\_forever_"),
+    Path(r"C:\Program Files\World of Warcraft\_forever_"),
+] + [Path(f"{d}:\\") / sub / "_forever_" for d in "CDEFG"
+     for sub in ("World of Warcraft", r"Games\World of Warcraft", r"Program Files (x86)\World of Warcraft")]
 
 BG, PANEL, AMBER, TXT, MUTE, GREEN, RED = "#0b0b0b", "#151515", "#ffa028", "#e0e0e0", "#808080", "#3ddc84", "#ff5c5c"
 FONT = ("Consolas", 10)
 
 
-def python_exe():
-    """python.exe (pas pythonw) pour pouvoir lire la sortie du collecteur."""
-    p = Path(sys.executable)
-    cand = p.with_name("python.exe")
-    return str(cand if cand.exists() else p)
+def load_config():
+    try:
+        return json.loads(CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg):
+    CONFIG.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def find_wow():
+    for p in WOW_CANDIDATES:
+        if (p / "Interface").is_dir() or (p / "Wow.exe").exists():
+            return p
+    return None
+
+
+def fetch(url, timeout=60):
+    req = urllib.request.Request(url, headers={"User-Agent": "BZ-Terminal-Launcher", "Cache-Control": "no-cache"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
 
 
 def make_shortcut(lnk: Path, extra_args=""):
     pyw = Path(sys.executable).with_name("pythonw.exe")
     target = pyw if pyw.exists() else Path(sys.executable)
-    ps = (
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:BZ_LNK);"
-        "$s.TargetPath=$env:BZ_TARGET;$s.Arguments=$env:BZ_ARGS;"
-        "$s.WorkingDirectory=$env:BZ_DIR;$s.Description='BZ Terminal';$s.Save()"
-    )
+    ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:BZ_LNK);"
+          "$s.TargetPath=$env:BZ_TARGET;$s.Arguments=$env:BZ_ARGS;"
+          "$s.WorkingDirectory=$env:BZ_DIR;$s.Description='BZ Terminal';$s.Save()")
     env = dict(os.environ, BZ_LNK=str(lnk), BZ_TARGET=str(target),
                BZ_ARGS=f'"{ROOT / "launcher.pyw"}" {extra_args}'.strip(), BZ_DIR=str(ROOT))
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=env, check=True,
@@ -49,23 +73,24 @@ def make_shortcut(lnk: Path, extra_args=""):
 
 
 class App:
-    def __init__(self, root, autostart=False):
+    def __init__(self, root):
         self.root = root
-        self.proc = None
+        self.cfg = load_config()
         self.logq = queue.Queue()
-        self.server_ok = False
+        self.busy = False
+        self.meta = None
+        self.last_sync = None
+
         root.title("BZ Terminal")
         root.configure(bg=BG)
-        root.geometry("720x520")
+        root.geometry("720x500")
         root.minsize(600, 420)
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         top = tk.Frame(root, bg=AMBER)
         top.pack(fill="x")
         tk.Label(top, text=" BZ TERMINAL · WoW Forever", bg=AMBER, fg="#000",
                  font=("Consolas", 13, "bold"), pady=6).pack(side="left")
 
-        # --- statut
         st = tk.Frame(root, bg=PANEL, padx=14, pady=10)
         st.pack(fill="x", padx=12, pady=(12, 6))
         self.lbl_state = tk.Label(st, text="", bg=PANEL, fg=TXT, font=("Consolas", 12, "bold"), anchor="w")
@@ -73,47 +98,47 @@ class App:
         self.lbl_info = tk.Label(st, text="", bg=PANEL, fg=MUTE, font=FONT, anchor="w", justify="left")
         self.lbl_info.pack(fill="x", pady=(4, 0))
 
-        # --- boutons
         bt = tk.Frame(root, bg=BG)
         bt.pack(fill="x", padx=12, pady=6)
-        self.btn_start = self.button(bt, "▶  Démarrer la collecte", self.start, primary=True)
-        self.btn_stop = self.button(bt, "■  Arrêter", self.stop)
-        self.button(bt, "Ouvrir le terminal  ↗", self.open_terminal)
+        self.btn_sync = self.button(bt, "⟳  Mettre à jour maintenant", self.sync_async, primary=True)
+        self.button(bt, "Ouvrir le terminal  ↗", lambda: webbrowser.open(SITE_URL))
+        self.button(bt, "Dossier WoW…", self.choose_wow)
 
         opt = tk.Frame(root, bg=BG)
         opt.pack(fill="x", padx=12)
         self.var_boot = tk.BooleanVar(value=STARTUP_LNK.exists())
-        tk.Checkbutton(opt, text="Lancer automatiquement au démarrage de Windows (collecte comprise)",
+        tk.Checkbutton(opt, text="Lancer au démarrage de Windows (mise à jour auto toutes les 15 min)",
                        variable=self.var_boot, command=self.toggle_boot, bg=BG, fg=TXT, selectcolor=PANEL,
                        activebackground=BG, activeforeground=AMBER, font=FONT).pack(side="left")
         tk.Button(opt, text="Raccourci Bureau", command=self.desktop_shortcut, bg=PANEL, fg=MUTE, bd=0,
                   font=FONT, activebackground="#222", activeforeground=AMBER, padx=8).pack(side="right")
 
-        # --- journal
         tk.Label(root, text="Journal", bg=BG, fg=MUTE, font=FONT, anchor="w").pack(fill="x", padx=12, pady=(10, 0))
-        self.log = tk.Text(root, bg="#000", fg="#bdbdbd", font=("Consolas", 9), bd=0, height=12,
-                           insertbackground=AMBER, wrap="word", state="disabled")
+        self.log = tk.Text(root, bg="#000", fg="#bdbdbd", font=("Consolas", 9), bd=0, height=10,
+                           wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True, padx=12, pady=(2, 12))
 
-        self.start_server()
-        if not self.ensure_credentials():
-            self.write("Identifiants Blizzard manquants : renseigne-les pour démarrer la collecte.")
-        elif autostart:
-            self.start()
-        self.refresh()
+        if not self.wow_path():
+            found = find_wow()
+            if found:
+                self.cfg["wow_path"] = str(found)
+                save_config(self.cfg)
         self.pump_log()
+        self.refresh()
+        self.sync_async()
+        self.schedule()
 
     def button(self, parent, text, cmd, primary=False):
         b = tk.Button(parent, text=text, command=cmd, font=("Consolas", 11, "bold"), bd=0, padx=14, pady=8,
                       bg=AMBER if primary else PANEL, fg="#000" if primary else TXT,
-                      activebackground="#ffb84d" if primary else "#262626", activeforeground="#000" if primary else AMBER,
-                      disabledforeground="#555", cursor="hand2")
+                      activebackground="#ffb84d" if primary else "#262626",
+                      activeforeground="#000" if primary else AMBER, disabledforeground="#555", cursor="hand2")
         b.pack(side="left", padx=(0, 8))
         return b
 
-    # --- journal ---------------------------------------------------------------
-    def write(self, line):
-        self.logq.put(line)
+    # --- journal --------------------------------------------------------------
+    def write(self, msg):
+        self.logq.put(time.strftime("[%H:%M:%S] ") + msg)
 
     def pump_log(self):
         lines = []
@@ -122,111 +147,103 @@ class App:
         if lines:
             self.log.configure(state="normal")
             self.log.insert("end", "\n".join(lines) + "\n")
-            if int(self.log.index("end-1c").split(".")[0]) > 600:
-                self.log.delete("1.0", "200.0")
+            if int(self.log.index("end-1c").split(".")[0]) > 400:
+                self.log.delete("1.0", "150.0")
             self.log.see("end")
             self.log.configure(state="disabled")
+            self.refresh()
         self.root.after(300, self.pump_log)
 
-    # --- identifiants -------------------------------------------------------------
-    def ensure_credentials(self):
-        load_env()
-        if os.environ.get("BLIZZARD_CLIENT_ID") and os.environ.get("BLIZZARD_CLIENT_SECRET"):
-            if not os.environ.get("BZ_RULESET"):
-                update_env({"BZ_NAMESPACE": "dynamic-forever-eu", "BZ_RULESET": 1,
-                            "BZ_AUCTION_HOUSES": 113, "BZ_REALM_NAME": "Forever PvP"})
-            return True
-        return self.ask_credentials()
+    # --- dossier WoW -------------------------------------------------------------
+    def wow_path(self):
+        p = self.cfg.get("wow_path")
+        return Path(p) if p and Path(p).is_dir() else None
 
-    def ask_credentials(self):
-        win = tk.Toplevel(self.root, bg=BG, padx=16, pady=14)
-        win.title("Identifiants Blizzard")
-        win.transient(self.root)
-        win.grab_set()
-        tk.Label(win, text="Colle les identifiants de ton client\n(develop.battle.net → API Access)",
-                 bg=BG, fg=TXT, font=FONT, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        entries = {}
-        for i, (key, label) in enumerate([("BLIZZARD_CLIENT_ID", "Client ID"), ("BLIZZARD_CLIENT_SECRET", "Client Secret")]):
-            tk.Label(win, text=label, bg=BG, fg=MUTE, font=FONT).grid(row=i + 1, column=0, sticky="w")
-            e = tk.Entry(win, width=42, bg="#000", fg=AMBER, insertbackground=AMBER, font=FONT,
-                         show="•" if "SECRET" in key else "")
-            e.grid(row=i + 1, column=1, pady=3)
-            entries[key] = e
-        ok = {"v": False}
+    def addon_dir(self):
+        w = self.wow_path()
+        return w / "Interface" / "AddOns" / "BZTerminal" if w else None
 
-        def save():
-            vals = {k: e.get().strip() for k, e in entries.items()}
-            if not all(vals.values()):
+    def choose_wow(self):
+        d = filedialog.askdirectory(title="Choisis le dossier _forever_ de World of Warcraft",
+                                    initialdir=str(self.wow_path() or r"C:\Program Files (x86)\World of Warcraft"))
+        if d:
+            self.cfg["wow_path"] = d
+            save_config(self.cfg)
+            self.write(f"Dossier WoW : {d}")
+            self.sync_async()
+
+    # --- synchronisation ----------------------------------------------------------
+    def schedule(self):
+        self.root.after(SYNC_EVERY * 1000, lambda: (self.sync_async(), self.schedule()))
+
+    def sync_async(self):
+        if not self.busy:
+            self.busy = True
+            self.btn_sync.configure(state="disabled")
+            threading.Thread(target=self.sync, daemon=True).start()
+
+    def sync(self):
+        try:
+            dest = self.addon_dir()
+            if not dest:
+                self.write("Dossier WoW Forever introuvable : clique sur « Dossier WoW… » et choisis le dossier _forever_.")
                 return
-            vals.update({"BZ_REGION": "eu", "BZ_LOCALE": "fr_FR", "BZ_NAMESPACE": "dynamic-forever-eu",
-                         "BZ_RULESET": 1, "BZ_AUCTION_HOUSES": 113, "BZ_REALM_NAME": "Forever PvP"})
-            update_env(vals)
-            ok["v"] = True
-            win.destroy()
+            # 1. installer / mettre à jour le code de l'addon
+            dest.mkdir(parents=True, exist_ok=True)
+            fresh_install = not (dest / "BZTerminal.toc").exists()
+            for f in ADDON_SRC.iterdir():
+                if f.name != "Data.lua":
+                    shutil.copy2(f, dest / f.name)
+            if fresh_install:
+                self.write(f"Addon installé dans {dest}")
+            # 2. données
+            self.meta = json.loads(fetch(SITE_URL + "api/meta.json"))
+            data = fetch(SITE_URL + "Data.lua", timeout=120)
+            tmp = dest / "Data.lua.tmp"
+            tmp.write_bytes(data)
+            os.replace(tmp, dest / "Data.lua")
+            self.last_sync = time.time()
+            h = (self.meta.get("houses") or [{}])[0]
+            ts = h.get("last_ts")
+            when = time.strftime("%d/%m %H:%M", time.localtime(ts)) if ts else "?"
+            self.write(f"Données à jour (HV du {when}, {len(data) // 1024} Ko)."
+                       + ("  Lance le jeu : l'addon est prêt." if fresh_install else "  En jeu : /reload"))
+        except Exception as e:
+            self.write(f"Échec de la mise à jour : {e}")
+        finally:
+            self.busy = False
+            self.root.after(0, lambda: self.btn_sync.configure(state="normal"))
 
-        tk.Button(win, text="Enregistrer", command=save, bg=AMBER, fg="#000", bd=0, font=("Consolas", 10, "bold"),
-                  padx=12, pady=4).grid(row=3, column=1, sticky="e", pady=(10, 0))
-        self.root.wait_window(win)
-        return ok["v"]
+    # --- statut -----------------------------------------------------------------
+    def refresh(self):
+        dest = self.addon_dir()
+        ok = bool(dest and (dest / "BZTerminal.toc").exists() and self.last_sync)
+        self.lbl_state.configure(text="●  Addon à jour" if ok else "●  Addon pas encore à jour",
+                                 fg=GREEN if ok else RED)
+        lines = []
+        h = (self.meta or {}).get("houses") or []
+        if h:
+            ts = h[0].get("last_ts")
+            if ts:
+                mins = int((time.time() - ts) / 60)
+                age = f"{mins} min" if mins < 60 else f"{mins // 60} h {mins % 60:02d}"
+                lines.append(f"Dernières données HV (GitHub) : {time.strftime('%d/%m %H:%M', time.localtime(ts))}"
+                             f" (il y a {age}) · {h[0].get('n_snapshots', 0)} snapshots")
+        lines.append(f"Dossier WoW : {self.wow_path() or 'introuvable'}")
+        if self.last_sync:
+            lines.append(f"Dernière mise à jour de l'addon : {time.strftime('%H:%M', time.localtime(self.last_sync))}"
+                         f" · prochaine dans ~15 min")
+        self.lbl_info.configure(text="\n".join(lines))
 
-    # --- serveur web (dans ce processus) -------------------------------------------
-    def start_server(self):
-        def run():
-            try:
-                import server
-                from http.server import ThreadingHTTPServer
-                httpd = ThreadingHTTPServer(("127.0.0.1", PORT), server.Handler)
-                self.server_ok = True
-                httpd.serve_forever()
-            except OSError:
-                # port déjà pris : probablement un serveur déjà lancé, le terminal reste accessible
-                self.server_ok = True
-                self.write(f"Le port {PORT} est déjà utilisé (terminal déjà lancé ailleurs ?).")
-            except Exception as e:
-                self.write(f"Erreur serveur : {e!r}")
-        threading.Thread(target=run, daemon=True).start()
-
-    def open_terminal(self):
-        webbrowser.open(URL)
-
-    # --- collecteur (sous-processus) ------------------------------------------------
-    def running(self):
-        return self.proc is not None and self.proc.poll() is None
-
-    def start(self):
-        if self.running() or not self.ensure_credentials():
-            return
-        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-        self.proc = subprocess.Popen(
-            [python_exe(), "collect.py", "--loop"], cwd=ROOT, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW)
-        self.write(time.strftime("[%H:%M:%S] ") + "Collecte démarrée (vérification toutes les 10 min).")
-        threading.Thread(target=self.read_proc, args=(self.proc,), daemon=True).start()
-        self.refresh(once=True)
-
-    def read_proc(self, proc):
-        for line in proc.stdout:
-            self.write(line.rstrip())
-        code = proc.wait()
-        if code not in (0, None) and proc is self.proc:
-            self.write(time.strftime("[%H:%M:%S] ") + f"La collecte s'est arrêtée (code {code}).")
-
-    def stop(self):
-        if self.running():
-            self.proc.terminate()
-            self.write(time.strftime("[%H:%M:%S] ") + "Collecte arrêtée.")
-        self.refresh(once=True)
-
-    # --- options -----------------------------------------------------------------
+    # --- options ------------------------------------------------------------------
     def toggle_boot(self):
         try:
             if self.var_boot.get():
-                make_shortcut(STARTUP_LNK, "--autostart --minimized")
-                self.write("Lancement automatique au démarrage de Windows : activé.")
+                make_shortcut(STARTUP_LNK, "--minimized")
+                self.write("Démarrage automatique avec Windows : activé.")
             else:
                 STARTUP_LNK.unlink(missing_ok=True)
-                self.write("Lancement automatique au démarrage de Windows : désactivé.")
+                self.write("Démarrage automatique avec Windows : désactivé.")
         except Exception as e:
             messagebox.showerror("BZ Terminal", f"Impossible de modifier le démarrage automatique :\n{e}")
             self.var_boot.set(STARTUP_LNK.exists())
@@ -238,52 +255,10 @@ class App:
         except Exception as e:
             messagebox.showerror("BZ Terminal", f"Impossible de créer le raccourci :\n{e}")
 
-    # --- statut ------------------------------------------------------------------
-    def db_status(self):
-        if not DB.exists():
-            return None
-        try:
-            con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=2)
-            r = con.execute("SELECT MAX(ts), COUNT(*) FROM snapshots").fetchone()
-            last = con.execute("SELECT n_auctions FROM snapshots ORDER BY ts DESC LIMIT 1").fetchone()
-            items = con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-            con.close()
-            return {"ts": r[0], "n": r[1], "auctions": last[0] if last else 0, "items": items}
-        except sqlite3.Error:
-            return None
-
-    def refresh(self, once=False):
-        run = self.running()
-        self.lbl_state.configure(text="●  Collecte en cours" if run else "●  Collecte arrêtée",
-                                 fg=GREEN if run else RED)
-        self.btn_start.configure(state="disabled" if run else "normal")
-        self.btn_stop.configure(state="normal" if run else "disabled")
-        s = self.db_status()
-        if s and s["ts"]:
-            mins = int((time.time() - s["ts"]) / 60)
-            age = f"{mins} min" if mins < 60 else f"{mins // 60} h {mins % 60:02d}"
-            info = (f"Dernières données HV : {time.strftime('%d/%m %H:%M', time.localtime(s['ts']))} (il y a {age})\n"
-                    f"{s['auctions']:,} annonces · {s['items']:,} objets connus · {s['n']} snapshots enregistrés"
-                    ).replace(",", " ")
-        else:
-            info = "Aucune donnée pour l'instant : clique sur « Démarrer la collecte »."
-        srv = f"\nTerminal : {URL}" if self.server_ok else "\nTerminal : démarrage…"
-        self.lbl_info.configure(text=info + srv)
-        if not once:
-            self.root.after(5000, self.refresh)
-
-    def on_close(self):
-        if self.running():
-            if not messagebox.askyesno("BZ Terminal", "Fermer arrête la collecte.\n"
-                                       "(Astuce : réduis la fenêtre pour la laisser tourner.)\n\nFermer quand même ?"):
-                return
-            self.proc.terminate()
-        self.root.destroy()
-
 
 def main():
     root = tk.Tk()
-    App(root, autostart="--autostart" in sys.argv)
+    App(root)
     if "--minimized" in sys.argv:
         root.iconify()
     root.mainloop()

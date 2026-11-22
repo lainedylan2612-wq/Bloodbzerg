@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: |cffffa028BZ Terminal|r
+## Notes: Prix de l'hôtel des ventes WoW Forever dans les infobulles (données API Blizzard, mises à jour par le lanceur BZ Terminal).
+## Author: lainedylan2612-wq
+## Version: 0.1.0
+
+Data.lua
+BZTerminal.lua
