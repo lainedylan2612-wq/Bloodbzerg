@@ -97,14 +97,14 @@ end
 local function status()
   house = house or pickHouse()
   if not house then
-    print(TITLE .. " : aucune donnée. Lance le lanceur BZ Terminal puis fais /reload.")
+    print(TITLE .. " : aucune donnée. Ouvre le lanceur BZ Terminal, puis fais /reload.")
     return
   end
   local n = 0
   for _ in pairs(house.items) do n = n + 1 end
   print(format("%s : %s, %d objets, données d'il y a %s.", TITLE, house.name or "?", n, ageText(house.ts)))
   if time() - house.ts > 2 * 3600 then
-    print(TITLE .. " : données anciennes. Vérifie que le lanceur tourne, puis /reload.")
+    print(TITLE .. " : données de plus de 2 h. Fais /reload ; si ça persiste, ouvre le lanceur BZ Terminal.")
   end
 end
 
