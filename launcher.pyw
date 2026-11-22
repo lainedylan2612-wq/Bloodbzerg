@@ -1,90 +1,82 @@
 """BZ Terminal — lanceur (double-clic).
 
-La collecte tourne sur GitHub. Ce lanceur :
-  - installe / met à jour l'addon BZTerminal dans WoW Forever,
-  - télécharge les dernières données (Data.lua) toutes les 15 min,
-  - ouvre le terminal en ligne.
+La collecte tourne sur GitHub. Ce lanceur sert à :
+  - installer l'addon BZTerminal dans WoW Forever et le mettre à jour à la demande,
+  - activer la mise à jour automatique (tâche planifiée Windows invisible, toutes les 15 min),
+  - ouvrir le terminal en ligne.
 """
-import json
 import os
 import queue
-import shutil
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
-import urllib.request
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 ROOT = Path(__file__).resolve().parent
-CONFIG = ROOT / "launcher.json"
-ADDON_SRC = ROOT / "addon" / "BZTerminal"
-SITE_URL = "https://lainedylan2612-wq.github.io/Bloodbzerg/"
-SYNC_EVERY = 15 * 60
-STARTUP_LNK = Path(os.environ.get("APPDATA", "")) / r"Microsoft\Windows\Start Menu\Programs\Startup\BZ Terminal.lnk"
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
+
+from bz import sync  # noqa: E402
+
+TASK_NAME = "BZ Terminal - MAJ addon"
 DESKTOP_LNK = Path.home() / "Desktop" / "BZ Terminal.lnk"
-WOW_CANDIDATES = [
-    Path(r"C:\Program Files (x86)\World of Warcraft\_forever_"),
-    Path(r"C:\Program Files\World of Warcraft\_forever_"),
-] + [Path(f"{d}:\\") / sub / "_forever_" for d in "CDEFG"
-     for sub in ("World of Warcraft", r"Games\World of Warcraft", r"Program Files (x86)\World of Warcraft")]
+SYNC_LOG = ROOT / "data" / "sync.log"
 
 BG, PANEL, AMBER, TXT, MUTE, GREEN, RED = "#0b0b0b", "#151515", "#ffa028", "#e0e0e0", "#808080", "#3ddc84", "#ff5c5c"
 FONT = ("Consolas", 10)
+NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
 
-def load_config():
-    try:
-        return json.loads(CONFIG.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+def pythonw():
+    p = Path(sys.executable).with_name("pythonw.exe")
+    return str(p if p.exists() else sys.executable)
 
 
-def save_config(cfg):
-    CONFIG.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+def powershell(script, **env):
+    return subprocess.run(["powershell", "-NoProfile", "-Command", script], env=dict(os.environ, **env),
+                          capture_output=True, text=True, creationflags=NO_WINDOW)
 
 
-def find_wow():
-    for p in WOW_CANDIDATES:
-        if (p / "Interface").is_dir() or (p / "Wow.exe").exists():
-            return p
-    return None
+def task_exists():
+    return subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME], capture_output=True,
+                          creationflags=NO_WINDOW).returncode == 0
 
 
-def fetch(url, timeout=60):
-    req = urllib.request.Request(url, headers={"User-Agent": "BZ-Terminal-Launcher", "Cache-Control": "no-cache"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+def create_task():
+    script = (
+        "$a = New-ScheduledTaskAction -Execute $env:BZ_EXE -Argument ('\"' + $env:BZ_SCRIPT + '\"') "
+        "-WorkingDirectory $env:BZ_DIR;"
+        "$t = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) "
+        "-RepetitionInterval (New-TimeSpan -Minutes 15);"
+        "$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries "
+        "-DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5);"
+        "Register-ScheduledTask -TaskName $env:BZ_TASK -Action $a -Trigger $t -Settings $s "
+        "-Description 'Télécharge les données BZ Terminal dans l addon WoW' -Force | Out-Null"
+    )
+    r = powershell(script, BZ_EXE=pythonw(), BZ_SCRIPT=str(ROOT / "sync.py"), BZ_DIR=str(ROOT), BZ_TASK=TASK_NAME)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or r.stdout.strip())
 
 
-def make_shortcut(lnk: Path, extra_args=""):
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    target = pyw if pyw.exists() else Path(sys.executable)
-    ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:BZ_LNK);"
-          "$s.TargetPath=$env:BZ_TARGET;$s.Arguments=$env:BZ_ARGS;"
-          "$s.WorkingDirectory=$env:BZ_DIR;$s.Description='BZ Terminal';$s.Save()")
-    env = dict(os.environ, BZ_LNK=str(lnk), BZ_TARGET=str(target),
-               BZ_ARGS=f'"{ROOT / "launcher.pyw"}" {extra_args}'.strip(), BZ_DIR=str(ROOT))
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=env, check=True,
-                   creationflags=subprocess.CREATE_NO_WINDOW)
+def delete_task():
+    subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], capture_output=True, creationflags=NO_WINDOW)
 
 
 class App:
     def __init__(self, root):
         self.root = root
-        self.cfg = load_config()
         self.logq = queue.Queue()
         self.busy = False
         self.meta = None
-        self.last_sync = None
 
         root.title("BZ Terminal")
         root.configure(bg=BG)
-        root.geometry("720x500")
-        root.minsize(600, 420)
+        root.geometry("720x480")
+        root.minsize(600, 400)
 
         top = tk.Frame(root, bg=AMBER)
         top.pack(fill="x")
@@ -101,14 +93,14 @@ class App:
         bt = tk.Frame(root, bg=BG)
         bt.pack(fill="x", padx=12, pady=6)
         self.btn_sync = self.button(bt, "⟳  Mettre à jour maintenant", self.sync_async, primary=True)
-        self.button(bt, "Ouvrir le terminal  ↗", lambda: webbrowser.open(SITE_URL))
+        self.button(bt, "Ouvrir le terminal  ↗", lambda: webbrowser.open(sync.SITE_URL))
         self.button(bt, "Dossier WoW…", self.choose_wow)
 
         opt = tk.Frame(root, bg=BG)
         opt.pack(fill="x", padx=12)
-        self.var_boot = tk.BooleanVar(value=STARTUP_LNK.exists())
-        tk.Checkbutton(opt, text="Lancer au démarrage de Windows (mise à jour auto toutes les 15 min)",
-                       variable=self.var_boot, command=self.toggle_boot, bg=BG, fg=TXT, selectcolor=PANEL,
+        self.var_auto = tk.BooleanVar(value=task_exists())
+        tk.Checkbutton(opt, text="Mise à jour automatique (invisible, toutes les 15 min, même sans ce lanceur)",
+                       variable=self.var_auto, command=self.toggle_auto, bg=BG, fg=TXT, selectcolor=PANEL,
                        activebackground=BG, activeforeground=AMBER, font=FONT).pack(side="left")
         tk.Button(opt, text="Raccourci Bureau", command=self.desktop_shortcut, bg=PANEL, fg=MUTE, bd=0,
                   font=FONT, activebackground="#222", activeforeground=AMBER, padx=8).pack(side="right")
@@ -118,15 +110,11 @@ class App:
                            wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True, padx=12, pady=(2, 12))
 
-        if not self.wow_path():
-            found = find_wow()
-            if found:
-                self.cfg["wow_path"] = str(found)
-                save_config(self.cfg)
+        if SYNC_LOG.exists():  # dernières lignes de la tâche automatique
+            for line in SYNC_LOG.read_text(encoding="utf-8").splitlines()[-3:]:
+                self.logq.put(line)
         self.pump_log()
-        self.refresh()
         self.sync_async()
-        self.schedule()
 
     def button(self, parent, text, cmd, primary=False):
         b = tk.Button(parent, text=text, command=cmd, font=("Consolas", 11, "bold"), bd=0, padx=14, pady=8,
@@ -136,7 +124,6 @@ class App:
         b.pack(side="left", padx=(0, 8))
         return b
 
-    # --- journal --------------------------------------------------------------
     def write(self, msg):
         self.logq.put(time.strftime("[%H:%M:%S] ") + msg)
 
@@ -147,120 +134,84 @@ class App:
         if lines:
             self.log.configure(state="normal")
             self.log.insert("end", "\n".join(lines) + "\n")
-            if int(self.log.index("end-1c").split(".")[0]) > 400:
-                self.log.delete("1.0", "150.0")
             self.log.see("end")
             self.log.configure(state="disabled")
             self.refresh()
         self.root.after(300, self.pump_log)
 
-    # --- dossier WoW -------------------------------------------------------------
-    def wow_path(self):
-        p = self.cfg.get("wow_path")
-        return Path(p) if p and Path(p).is_dir() else None
-
-    def addon_dir(self):
-        w = self.wow_path()
-        return w / "Interface" / "AddOns" / "BZTerminal" if w else None
-
     def choose_wow(self):
         d = filedialog.askdirectory(title="Choisis le dossier _forever_ de World of Warcraft",
-                                    initialdir=str(self.wow_path() or r"C:\Program Files (x86)\World of Warcraft"))
+                                    initialdir=str(sync.wow_path() or r"C:\Program Files (x86)\World of Warcraft"))
         if d:
-            self.cfg["wow_path"] = d
-            save_config(self.cfg)
+            cfg = sync.load_config()
+            cfg["wow_path"] = d
+            sync.save_config(cfg)
             self.write(f"Dossier WoW : {d}")
             self.sync_async()
 
-    # --- synchronisation ----------------------------------------------------------
-    def schedule(self):
-        self.root.after(SYNC_EVERY * 1000, lambda: (self.sync_async(), self.schedule()))
-
     def sync_async(self):
-        if not self.busy:
-            self.busy = True
-            self.btn_sync.configure(state="disabled")
-            threading.Thread(target=self.sync, daemon=True).start()
+        if self.busy:
+            return
+        self.busy = True
+        self.btn_sync.configure(state="disabled")
 
-    def sync(self):
-        try:
-            dest = self.addon_dir()
-            if not dest:
-                self.write("Dossier WoW Forever introuvable : clique sur « Dossier WoW… » et choisis le dossier _forever_.")
-                return
-            # 1. installer / mettre à jour le code de l'addon
-            dest.mkdir(parents=True, exist_ok=True)
-            fresh_install = not (dest / "BZTerminal.toc").exists()
-            for f in ADDON_SRC.iterdir():
-                if f.name != "Data.lua":
-                    shutil.copy2(f, dest / f.name)
-            if fresh_install:
-                self.write(f"Addon installé dans {dest}")
-            # 2. données
-            self.meta = json.loads(fetch(SITE_URL + "api/meta.json"))
-            data = fetch(SITE_URL + "Data.lua", timeout=120)
-            tmp = dest / "Data.lua.tmp"
-            tmp.write_bytes(data)
-            os.replace(tmp, dest / "Data.lua")
-            self.last_sync = time.time()
-            h = (self.meta.get("houses") or [{}])[0]
-            ts = h.get("last_ts")
-            when = time.strftime("%d/%m %H:%M", time.localtime(ts)) if ts else "?"
-            self.write(f"Données à jour (HV du {when}, {len(data) // 1024} Ko)."
-                       + ("  Lance le jeu : l'addon est prêt." if fresh_install else "  En jeu : /reload"))
-        except Exception as e:
-            self.write(f"Échec de la mise à jour : {e}")
-        finally:
-            self.busy = False
-            self.root.after(0, lambda: self.btn_sync.configure(state="normal"))
+        def work():
+            try:
+                self.meta = sync.run(self.write)
+            except Exception as e:
+                self.write(f"Échec de la mise à jour : {e}")
+            finally:
+                self.busy = False
+                self.root.after(0, lambda: self.btn_sync.configure(state="normal"))
+        threading.Thread(target=work, daemon=True).start()
 
-    # --- statut -----------------------------------------------------------------
     def refresh(self):
-        dest = self.addon_dir()
-        ok = bool(dest and (dest / "BZTerminal.toc").exists() and self.last_sync)
-        self.lbl_state.configure(text="●  Addon à jour" if ok else "●  Addon pas encore à jour",
-                                 fg=GREEN if ok else RED)
+        wow = sync.wow_path()
+        installed = bool(wow and (wow / "Interface" / "AddOns" / "BZTerminal" / "BZTerminal.toc").exists())
+        auto = self.var_auto.get()
+        if installed and auto:
+            self.lbl_state.configure(text="●  Addon installé · mise à jour automatique active", fg=GREEN)
+        elif installed:
+            self.lbl_state.configure(text="●  Addon installé · mise à jour automatique désactivée", fg=AMBER)
+        else:
+            self.lbl_state.configure(text="●  Addon pas encore installé", fg=RED)
         lines = []
         h = (self.meta or {}).get("houses") or []
-        if h:
-            ts = h[0].get("last_ts")
-            if ts:
-                mins = int((time.time() - ts) / 60)
-                age = f"{mins} min" if mins < 60 else f"{mins // 60} h {mins % 60:02d}"
-                lines.append(f"Dernières données HV (GitHub) : {time.strftime('%d/%m %H:%M', time.localtime(ts))}"
-                             f" (il y a {age}) · {h[0].get('n_snapshots', 0)} snapshots")
-        lines.append(f"Dossier WoW : {self.wow_path() or 'introuvable'}")
-        if self.last_sync:
-            lines.append(f"Dernière mise à jour de l'addon : {time.strftime('%H:%M', time.localtime(self.last_sync))}"
-                         f" · prochaine dans ~15 min")
+        if h and h[0].get("last_ts"):
+            ts = h[0]["last_ts"]
+            mins = int((time.time() - ts) / 60)
+            age = f"{mins} min" if mins < 60 else f"{mins // 60} h {mins % 60:02d}"
+            lines.append(f"Dernières données HV (GitHub) : {time.strftime('%d/%m %H:%M', time.localtime(ts))}"
+                         f" (il y a {age}) · {h[0].get('n_snapshots', 0)} snapshots")
+        lines.append(f"Dossier WoW : {wow or 'introuvable — clique sur « Dossier WoW… »'}")
+        lines.append("En jeu : /reload pour charger les dernières données · /bz · /bz affaires")
         self.lbl_info.configure(text="\n".join(lines))
 
-    # --- options ------------------------------------------------------------------
-    def toggle_boot(self):
+    def toggle_auto(self):
         try:
-            if self.var_boot.get():
-                make_shortcut(STARTUP_LNK, "--minimized")
-                self.write("Démarrage automatique avec Windows : activé.")
+            if self.var_auto.get():
+                create_task()
+                self.write("Mise à jour automatique activée (tâche Windows « " + TASK_NAME + " »).")
             else:
-                STARTUP_LNK.unlink(missing_ok=True)
-                self.write("Démarrage automatique avec Windows : désactivé.")
+                delete_task()
+                self.write("Mise à jour automatique désactivée.")
         except Exception as e:
-            messagebox.showerror("BZ Terminal", f"Impossible de modifier le démarrage automatique :\n{e}")
-            self.var_boot.set(STARTUP_LNK.exists())
+            messagebox.showerror("BZ Terminal", f"Impossible de modifier la tâche planifiée :\n{e}")
+        self.var_auto.set(task_exists())
+        self.refresh()
 
     def desktop_shortcut(self):
-        try:
-            make_shortcut(DESKTOP_LNK)
-            self.write(f"Raccourci créé sur le Bureau : {DESKTOP_LNK.name}")
-        except Exception as e:
-            messagebox.showerror("BZ Terminal", f"Impossible de créer le raccourci :\n{e}")
+        script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:BZ_LNK);"
+                  "$s.TargetPath=$env:BZ_EXE;$s.Arguments=('\"' + $env:BZ_SCRIPT + '\"');"
+                  "$s.WorkingDirectory=$env:BZ_DIR;$s.Save()")
+        r = powershell(script, BZ_LNK=str(DESKTOP_LNK), BZ_EXE=pythonw(),
+                       BZ_SCRIPT=str(ROOT / "launcher.pyw"), BZ_DIR=str(ROOT))
+        self.write("Raccourci créé sur le Bureau." if r.returncode == 0 else f"Échec du raccourci : {r.stderr.strip()}")
 
 
 def main():
     root = tk.Tk()
     App(root)
-    if "--minimized" in sys.argv:
-        root.iconify()
     root.mainloop()
 
 
