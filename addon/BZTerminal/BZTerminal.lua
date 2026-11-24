@@ -11,13 +11,19 @@ local DEAL_RATIO = 0.7 -- prix min <= 70 % de la médiane 7j => affaire
 
 local house
 
+-- Icônes de pièces du jeu (or, argent, cuivre)
+local GOLD   = "|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t"
+local SILVER = "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t"
+local COPPER = "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
+
 local function money(c)
   if not c then return GREY .. "—|r" end
-  if GetCoinTextureString then return GetCoinTextureString(c) end
+  c = floor(c + 0.5)
   local g, s, cu = floor(c / 10000), floor(c % 10000 / 100), c % 100
-  if g > 0 then return format("%dg %02ds", g, s) end
-  if s > 0 then return format("%ds %02dc", s, cu) end
-  return format("%dc", cu)
+  if g >= 100 then return g .. GOLD end
+  if g > 0 then return format("%d%s %02d%s", g, GOLD, s, SILVER) end
+  if s > 0 then return format("%d%s %02d%s", s, SILVER, cu, COPPER) end
+  return cu .. COPPER
 end
 
 local function ageText(ts)
